@@ -1,6 +1,6 @@
 ######Tarea_2###########
 #Tenemos una base de datos Futbol 
-#contiene n=8698, GL es el número de goles que anot+o el equipo local
+#contiene n=8698, GL es el nÃºmero de goles que anot+o el equipo local
 #GV corresponde a los goles anotados por el equipo visitante
 #X= Goles anotados en el partido
 #Z la diferencia absoluta de goles entre los dos equipos 
@@ -42,7 +42,7 @@ parallel::detectCores()## detecta cuantos procesadores tienes para trabajar , po
 ###por ejemplo netflix 
 ##aqui no se utilizan los for tradicionales , se utilizan los for each 
 cl <- makeCluster(7)
-###luego de escoger el número de procesadores los tenemos que preparar para el proceso
+###luego de escoger el nÃºmero de procesadores los tenemos que preparar para el proceso
 registerDoParallel(cl)
 t <- proc.time()
 
@@ -75,7 +75,7 @@ proc.time() - t
 stopCluster(cl)
 
 ########################################################
-#Suponga que X tiene distribución desconocida,
+#Suponga que X tiene distribuciÃ³n desconocida,
 #Contestar lo anterior utilizando boostrap
 t <- proc.time()
 pro.est.boot <- c()
@@ -103,7 +103,7 @@ proc.time() - t
 #######################################################
 
 #Suponga que Z se distribuye desconocida , encuentre un intervalo del 99% de confianza para la probabilidad
-#de que un partido del futbol español tenga un empate 
+#de que un partido del futbol espaÃ±ol tenga un empate 
 dif <-abs(GL-GV)
 dif <- dif[!is.na(dif)]
 n <- length(dif)
