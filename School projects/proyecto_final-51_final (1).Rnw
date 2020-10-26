@@ -1,0 +1,1316 @@
+\documentclass{article}
+\UseRawInputEncoding
+\usepackage[a4paper,top=1cm,bottom=2cm,left=2cm,right=2cm]{geometry}
+\usepackage[latin1]{inputenc}
+\usepackage{color}
+\usepackage{multirow}
+\usepackage{framed}
+\usepackage{color}
+\usepackage{graphicx}
+\usepackage{enumerate}
+\title{Proyecto de Regresi\'on Lineal Multiple}
+\author{Romero Tapia Luis Donaldo \\Rosas Vargas Pilar Issamara\\ Tapia Huerta Beatriz \\ Villegas Moctezuma Angel Alejandro}
+\date{07 de Junio del 2019}
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+\maketitle
+
+<<echo=F,include=F,message=FALSE>>==
+chooseCRANmirror(graphics=FALSE, ind=1)
+knitr::opts_chunk$set(echo = TRUE)
+
+#Cargaamos las librerias a ocupar
+library(lmtest)
+library(nortest)
+library(MASS)
+library(leaps)
+library(car)
+library(PerformanceAnalytics)
+library(psych)
+library(colorRamps)
+
+@
+\textbf{Base de datos}\\
+Para realizar el análisis de las variables socioeconómicas primero se procedio a cargar ambas bases y limpiarlas para poder crear una conjunta.\\
+Primero se trabajo con la base del INEGI, esta tenia los subtotales por entidad federativa y total del país, al estudiarla observamos que el codigo para decodificarlos era $CVE_DISTRITO = 0$ por lo que encuentra el número de coincidencias en toda la base y se retiran.\\
+
+<<echo=T,include=F>>==
+INEGI<-as.data.frame(read.csv("~/INEGI/eiege_eic_2015.csv",sep = ",",stringsAsFactors = F))
+#sabemos que CVE_DISTRITO=0 implica un total, entonces retiramos esas filas
+table(INEGI$CVE_DISTRITO[]==0) #coincidencias con cero
+aux=rep(0,33) #numero de incidencias de totales
+j=1
+for( i in 1:nrow(INEGI)){
+  if(INEGI$CVE_DISTRITO[i] == 0){
+    aux[j]=i
+    j=j+1
+  }
+}
+INEGI=INEGI[-aux,] #quitamos subtotales
+table(INEGI$CVE_DISTRITO[]==0) #corrobora que ya no haya ningun cero
+
+@
+Después se realiza el ID unico para cada distrito, que comprende de dos digitos para el Estado y dos dígitos para el distrito interno, por lo que primero hacemos que todos distritos y Estados sean de dos dígitos y luego se juntan con el comando "unite"\\
+<<echo=T,include=F>>==
+for(i in 1:nrow(INEGI)){
+  if(as.numeric(INEGI$ï..CVE_ENT[i])< 10){
+    INEGI$ï..CVE_ENT[i]<-paste0(0,INEGI$ï..CVE_ENT[i])
+  }
+  if(as.numeric(INEGI$CVE_DISTRITO[i])<10){
+    INEGI$CVE_DISTRITO[i]<-paste0(0,INEGI$CVE_DISTRITO[i])
+  }
+}
+
+#creamos el nuevo ID
+library(tidyr)
+INEGI<- unite(INEGI,ID,c(1:2))
+@
+Posteriormete se quitaron los intervalos de confianza de cada variable asi como los errores de estimación.\\
+
+<<echo=T,include=F>>==
+nom_col<-names(INEGI)
+aux_nom_col<-strsplit(nom_col,"_")
+a=0
+for( i in 1:length(aux_nom_col)){
+  if(length(aux_nom_col[[i]])==3){
+    a<-c(a,i)
+  }
+}
+a=a[-1] #elimina valor de inicialización
+INEGI<-INEGI[,-a] #base slos indices
+@
+Por último al estudiar las tres primeras variables se observo que no eran númericas, por lo que se les dio una decodificación númerica para hacerlas comparables con las demás.\\
+<<echo=T,include=F>>==
+#Casos indigenas
+for ( i in 1:nrow(INEGI)){
+  if(INEGI$Indigena[i]=="NO"){
+    INEGI$Indigena[i]=0
+  }
+  else{
+    INEGI$Indigena[i]=1
+  }
+}
+INEGI$Indigena<-as.numeric(INEGI$Indigena)
+
+for ( i in 1:nrow(INEGI)){
+  if(INEGI$MI[i]=="*"){
+    INEGI$MI[i]=1
+  }
+  else{
+    INEGI$MI[i]=0
+  }
+}
+INEGI$MI<-as.numeric(INEGI$MI)
+
+categorias<-names(table(INEGI$Complejidad))
+for ( i in 1:nrow(INEGI)){
+ for (j in 1:length(categorias)){
+   if(INEGI$Complejidad[i]==categorias[j]){
+     INEGI$Complejidad[i]=j
+   }
+ }
+}
+INEGI$Complejidad<-as.numeric(INEGI$Complejidad)
+@
+Una vez que la base del INEGI estaba preparada se procedio a trabajar con la del INE y se seleccionarón las variables que eran relevantes para el estudio.\\
+<<echo=T,include=F>>==
+INE<-read.table("~/INEGI/Computos_Distritales_Presidente_2012.txt",sep="|",header = T) # cargamos la banames(INE)#vemos las variables que sirven
+INE_votos=INE[,c(1,2,15:31)] #base con la que vamos a trabajar
+a=0
+@
+Después se quitaron los distritos cuyo número de identificación faltaba i.e. los valores faltantes.\\
+<<echo=T,include=F>>==
+for( i in 1:nrow(INE_votos)){
+  if(is.na(INE_votos$DISTRITO_FEDERAL_2017[i]) == T){
+   a=c(a,i)
+  }
+}
+a=a[-1] #quitamos el valor inicial fijado
+INE_votos=INE_votos[-a,] #quitamos los na
+@
+Puesto que las variables estaban por casilla y no por distrito se realizo el acumulado para que pudieran ser comparables con la base de INEGI\\
+<<echo=T,include=F>>==
+INE_base_acumulada = data.frame() #definimos la nueva base
+k=1
+for(i in 1:32){
+  est<-subset(INE_votos,INE_votos$ID_ESTADO == i)
+  for(j in 1:length(table(est$DISTRITO_FEDERAL_2017))){
+    aux<-subset(est,est$DISTRITO_FEDERAL_2017 == j)
+    INE_base_acumulada[k,c(1,2)]<- c(est$ID_ESTADO[i],aux$DISTRITO_FEDERAL_2017[1])
+    INE_base_acumulada[k,3:length(est)]<- colSums(aux[3:19],na.rm = T)
+    k=k+1
+  }
+}
+
+colnames(INE_base_acumulada)<-names(INE_votos) #Cambiar nombres de la base acumulada
+@
+Al tener los votos por distrito se agregaron las cuatro variables nuevas que contienen el acumulado de votos por candidato según las coaliciones realizadas en 2012.\\
+<<echo=T,include=F>>==
+INE_base_acumulada$EPN<-INE_base_acumulada$PRI + INE_base_acumulada$PVEM + INE_base_acumulada$PRI_PVEM
+INE_base_acumulada$JVM<-INE_base_acumulada$PAN
+INE_base_acumulada$AMLO<-INE_base_acumulada$PRD + INE_base_acumulada$PT + INE_base_acumulada$MC + INE_base_acumulada$PRD_PT_MC + INE_base_acumulada$PRD_PT + INE_base_acumulada$PRD_MC + INE_base_acumulada$PT_MC
+INE_base_acumulada$Quadri<-INE_base_acumulada$PANAL
+#suma de las columnas
+Total<-colSums(INE_base_acumulada,na.rm = T)#vemos que las sumas coincidan
+@
+Por último se genero el ID de forma análoga a la base del INEGI\\
+<<echo=T,include=F>>==
+#hacemos que todos los ID sean de dos valores
+for(i in 1:nrow(INE_base_acumulada)){
+  if(as.numeric(INE_base_acumulada$ID_ESTADO[i])< 10){
+    INE_base_acumulada$ID_ESTADO[i]<-paste0(0,INE_base_acumulada$ID_ESTADO[i])
+  }
+  if(as.numeric(INE_base_acumulada$DISTRITO_FEDERAL_2017[i])<10){
+    INE_base_acumulada$DISTRITO_FEDERAL_2017[i]<-paste0(0,INE_base_acumulada$DISTRITO_FEDERAL_2017[i])
+  }
+}
+
+#creamos el nuevo ID
+library(tidyr)
+INE_base_acumulada<- unite(INE_base_acumulada,ID,c(1:2))
+@
+Finalmente con ambas bases preparadas se procedio a crear una nueva tomando como referencia los ID creados.\\
+<<echo=T,include=F>>==
+#juntamos las dos bases
+INEGI_INE<-data.frame()
+k=1
+for( i in 1:nrow(INEGI)){
+  for(j in 1:nrow(INE_base_acumulada)){
+    if(INEGI$ID[i]==INE_base_acumulada$ID[j]){
+      INEGI_INE[k,1]<-INE_base_acumulada$ID[j]
+      for(l in 2:5){
+        INEGI_INE[k,l]<-INE_base_acumulada[j,l+17]
+      }
+      for(l in 2:length(INEGI)){
+        INEGI_INE[k,l+4]<-INEGI[i,l]
+      }
+      k=k+1 
+    }
+  }
+}
+colnames(INEGI_INE)<-c("ID","EPN","JVM","AMLO","Quadri",names(INEGI[c(2:length(INEGI))]))
+#En teoria cada entrada deberia de coincidir con el orgininal, corroboremos
+comprob<-matrix(FALSE,nrow = 300,ncol=4)
+for(i in 1:nrow(INEGI_INE)){
+  comprob[i,1]<-INEGI_INE$EPN[i] == INE_base_acumulada$EPN[i]
+  comprob[i,2]<-INEGI_INE$JVM[i] == INE_base_acumulada$JVM[i]
+  comprob[i,3]<-INEGI_INE$AMLO[i] == INE_base_acumulada$AMLO[i]
+  comprob[i,4]<-INEGI_INE$Quadri[i] == INE_base_acumulada$Quadri[i]
+}
+table(comprob) #observamos que todas las entradas coinciden
+@
+Para realizar el estudio se separó en la muestra (distritos) en dos conjuntos, uno de entrenamiento(90\%) y otro de predicción(10\%).
+<<echo=F,include=T>>==
+#Antes de comenzar separaremos nuestras observaciones (distritos) en dos conjuntos, entrenamiento y prediccion
+n <- nrow(INEGI_INE)
+set.seed(713)
+id_test <- sample.int(n, round(n*0.1, 0), replace = FALSE)
+# Datos de prediccion
+INEGI_INE_PRED <- INEGI_INE[id_test, ]
+# Datos de entrenamiento
+INEGI_INE_TRAIN <-INEGI_INE[-id_test, ]
+@
+Habiendo separado la base conjunta se procede a realizar un Modelo de Regresión Lineal Múltiple para cada uno de los candidatos.\\
+\\
+\\
+\\
+\\
+Ahora, haremos un modelo para cada candidato EPN
+<<echo=F,include=T>>==
+
+library(car)
+library(carData)
+INE1=INEGI_INE_TRAIN[,c(6:115)]
+EPN<-lm(INEGI_INE_TRAIN$EPN ~ ., data = INE1)
+summary(EPN)
+require(car)
+
+@
+\\
+\\
+Notamos que esta prueba no es de ayuda en este momento pues existen variables que son combinaciones lineales de otras,así tenemos que construir EPN.vacio para tener el modelo vacio y el completo donde se integran todas las variables explicativas.Despues utilizaremos el metodo stepward,veamos el resultado del modelo obtenido y su respecivo VIF.
+
+<<echo=F,warnings=F,results=hide>>=
+
+EPN.vacio<-lm(EPN~1,INEGI_INE_TRAIN)
+EPN.completo<-lm(INEGI_INE_TRAIN$EPN ~ ., data = INE1)
+EPN1<-step(EPN.vacio, scope=list(lower=EPN.vacio,upper=EPN.completo), direction = "both")
+summary(EPN1)
+#tratemos nuevamente con vif
+vif(EPN1)
+@
+\\
+\\
+\\
+Podemos quitar mas variables, aunque teniendo cuidado en que mejore el modelo, quitemos de los que tienen mayor vif a los de menor, pero solo los que son mayores a $10$.Cabe aqui recalcar una cosa m\´as, haciendo este m\´etodo de ir quitando poco a poco las variables con ms VIf para as obtener un mejor modelo se llega a uno que ademsde tener la variable $IND\107$ no significativa en el modelo , la mayoria de los supuestos no se cumplian , ni con transformaciones se pudo arreglar ese problema ,pues empezaan a aparecer m\´as variables no significativas, as\´i decidimos quitar la variable $IND\_107$ desde el principio y ver a que se llega.
+\\
+Eso nos dio la idea de que conforme obteniamos el mejor modelo por el m\´etodo de ir quitando variables con vif mayor que $10$ y teniendo en cuenta lo antes descrito ,nuevamente veiamos que tanto mejoraba los supuestos con y sin transformaciones , y nuevamente probando que variables podian ser retiradas desde el principio y nuevamnete repetir el proceso hasta llegar a este punto.
+\\
+As\´i en este primer paso veremos el Vif de $ENP1$ y quitaremos las variables que nos dieron un mejor modelo , despues procederemos como siempre quitando la variable de mayor vif y mayor que $10$,entonces las variablesque que quitaremos de ENP son $IND\_107$ y al final $IND\_088$
+<<echo=F,warnings=F,results=hide>>=
+EPN2<-lm(formula = EPN ~ IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_065 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_090 + IND_119 + IND_094 + IND_823 + IND_002 +IND_138 + IND_104 + IND_815 + IND_085 + Complejidad+ IND_095 + IND_069 + IND_062 + IND_080 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN2)
+
+vif(EPN2) 
+EPN3<-lm(formula = EPN ~ IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_065 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_090 + IND_119 + IND_094 + IND_823 + IND_002+ IND_104 + IND_815 + IND_085 + Complejidad+ IND_095 + IND_069 + IND_062 + IND_080 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN3)
+
+vif(EPN3) 
+EPN4<-lm(formula = EPN ~ IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_090 + IND_119 + IND_094 + IND_823 + IND_002+ IND_104 + IND_815 + IND_085 + Complejidad+ IND_095 + IND_069 + IND_062 + IND_080 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN4)
+
+vif(EPN4) 
+EPN5<-lm(formula = EPN ~ IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_090 + IND_119 + IND_094 + IND_823 + IND_002+ IND_104 + IND_815 + IND_085 + Complejidad + IND_069 + IND_062 + IND_080 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN5)
+
+vif(EPN5) 
+EPN6<-lm(formula = EPN ~ IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_090 + IND_119 + IND_094 + IND_823 + IND_002+ IND_104 + IND_815 + IND_085 + Complejidad + IND_062 + IND_080 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN6)
+
+vif(EPN6) 
+EPN7<-lm(formula = EPN ~ IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_119 + IND_094 + IND_823 + IND_002+ IND_104 + IND_815 + IND_085 + Complejidad + IND_062 + IND_080 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN7)
+
+vif(EPN7) 
+EPN8<-lm(formula = EPN ~  IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_119 + IND_094 + IND_823 + IND_002+ IND_104 + IND_815 + IND_085 + Complejidad + IND_062 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN8)
+
+vif(EPN8) 
+EPN8_5<-lm(formula= EPN ~  IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_076 + IND_057 + IND_088 + IND_070 + IND_125 + IND_813 + IND_087 + IND_119 + IND_094 + IND_823 + IND_002+ IND_104 + IND_815 + Complejidad + IND_062 + MI + IND_061 + IND_126 + IND_074 + IND_120 + IND_066 + IND_124, data = INEGI_INE_TRAIN)
+summary(EPN8_5)
+
+vif(EPN8_5) 
+
+EPN8_52<-lm(formula= EPN ~  IND_115 + IND_117 + IND_802 + IND_055 + IND_063 + IND_116 + IND_076 + IND_057 + IND_070 + IND_125 +IND_813+ IND_087 + IND_119 + IND_094+MI+IND_002+ IND_104 + IND_815 + Complejidad + IND_062  + IND_061 + IND_126 + IND_120 + IND_066+IND_124 , data = INEGI_INE_TRAIN)
+summary(EPN8_52)
+
+vif(EPN8_52)
+@
+\\
+\\
+En donde ya no tenemos variables con vif mayor a $10$,exceptuando $IND\_070$ con $10.3$ , sin embargo tener esa variable mejora mucho nuestro modelo y tampoco es tan alejado de $10$, veremos a continuaci\´on la validaci\´on de los supuestos.
+\\
+Usamos nuevamente el metodo stepward, para encontrar un modelo m\´as chiquito con tope $EPN8\_52$.
+<<echo=F,warnings=F,results=hide>>=
+EPN9<-step(EPN.vacio, scope=list(lower=EPN.vacio,upper=EPN8_52), direction = "both")
+summary(EPN9)
+vif(EPN9)
+@
+\\
+\\
+$EPN9$ sera nuestro modelo final.Vemos que el vif de $IND\_070$ es de $10.3$ , creemos un precio bajo para que todo este en orden,ya con esto podemos ver que no hay muticolinealidad.
+\\
+El modelo que nos quedo al final al final consta de las siguientes variables:
+\\
+$IND\_115$....Porcentaje de la poblaci\´on de $12$ años y m\´as separada.
+\\
+$IND\_063$....Porcentaje de viviendas con disponibilidad de servicio sanitario en la vivienda.
+\\
+$IND\_802$....Estimador total de población de $15$ años y m\´as(Hombres).
+\\
+$IND\_117$....Porcentaje de la población de $12$ años y más viuda.
+\\
+$IND\_055$....Estimador total de viviendas particulares habitadas.
+\\
+$IND\_120$....Porentaje de la pobaci\´on afiliada a servicios m\´edicos por seguro privado.
+\\
+$IND\_057$....Promedio de ocupantes por cuartos.
+\\
+$IND\_070$....Porcentaje de viviendas con tel\´efono fijo.
+\\
+$IND\_119$....Porcentaje de poblaci\´on afiliada a servicios de salud.
+\\
+$IND\_087$....Porcentaje de aistencia escolar dela población de $3 a 5$ años.
+\\
+$IND\_813$....Porcentaje de la poblaci\´on ocupada que labora en el sector económico de minería,industriasmanufactureras,electricidad y agua.
+\\
+$IND_125$....Porcentaje de la población afiliada a servicios m\´edicos por otra institución.
+\\
+$IND\_076$....Porcetaje de viviendas alquiladas.
+$IND\_061$....Porcentaje de viviendas con disponibilidad de agua entuada en la vivienda.
+$IND\_062$...Porcentaje de viviendas con disponibilidad de drenaje.
+\\
+$IND\_126$...Porcentaje de la poblaci\´on de 3 años y m\´as que habla alguna legua indigena.
+\\
+Complejidad....Grupo de complejidad electoral.
+\\
+$IND\_815$....Porcentaje de la poblaci\´on ocupada que labora en el sector economico del comercio.
+\\
+$IND\_124$....Porcentaje de la población afiliada a Pmex,Defensa o Marina.
+\\
+$IND\_002$....Porcentaje estatal de la poblaci\´on.
+\\
+MI....Indicador de muestra insuficiente.
+\\
+$IND\_116$....Porcentaje de la población de $12$ años y m\´as divorciada.
+\\
+$IND\_094$...Porcentaje de la poblaci\´on de $15 a 24$ años que asiste a la escuela en un municipio o delegación distinto al de residencia.
+\\
+Ahora verifiquemos los supuestos, veamos si la varianza es constante.Notemos que los residuos estandarizados son los res estandar y los valores ajustados son los valjustados.Graficamos para ver si la varianza es constante. 
+<<echo=F,fig=T,warnings=F>>=
+resestandar<-rstandard(EPN9)
+vajustados<-fitted(EPN9) 
+plot(vajustados,resestandar, pch=6,main="Grafica para comprobar homoscedasticidad",ylim = c(-4,4))
+abline(h=qnorm(0.975,0,1)*sd(resestandar),col="red",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandar),col="red",lwd=3)
+@
+\\
+Podemos observar varianza constante ,a excepci\´on de algunos puntos fuera de la banda.Ahora hagamos la Prueba Homosedasticidad
+<<echo=F,warnings=F>>=
+bptest(EPN9)
+@
+\\
+Notemos que se cumple la homeostacidad deade que $p\_value=0.3233>0.05$.Revisemos m\´as a fondo la multicolinealidad.
+<<echo=false,warnings=F>>=
+attach(INEGI_INE_TRAIN)
+MI_1<-MI+1
+data_EPN9<-data.frame(IND_115,IND_063,IND_802,IND_117,IND_055,IND_120,IND_057,IND_070,IND_119,IND_087,IND_813,IND_125,IND_076,IND_061,IND_062,IND_126,Complejidad,IND_815,IND_124,IND_002,MI_1,IND_116,IND_094)
+summary(data_EPN9)
+#en efecto lo son desde que MI_1<-MI+1
+#verifiquemos supuestos
+corr=cor(data_EPN9)
+corr
+vif(EPN9)
+@
+\\
+Hacemos lo de MI para que m?s adelante no nos de problemas en las transformaciones,#ver con el summary si las variables son positivas y sacamos la correlaci\´on.
+\\
+Observamos nuevamente que las correlaciones m\´as altas estan en $IND\_070$ , aunque nuevamente no esta tan alejado del $10$.
+\\
+\\
+Histograma para comprobar el supuesto de normalidad junto con la curva normal asociada.
+<<echo=F,fig=T,warnings=F>>=
+hist(resestandar, prob=TRUE, breaks=10, col="cyan4", main="Histograma de residuos", ylab="Densidad")
+curve(dnorm(x,mean(resestandar),sd(resestandar)),add=TRUE, col="red4",lwd=3)
+#La grafica se adapta muy bien a la cura normal  exceptuandopor un pico que sobresale por 1 en el eje x,ya nos da buenos indicios de normalidad
+#Grafica probabilidad normal (QQ plot)
+qqnorm(resestandar,main="QQ-Plot de Residuos", pch=19,xlab="Cuantiles Teoricos", ylab="Cuantiles Muestrales",col="orange2")
+qqline(resestandar,col="pink3",lwd=3)
+#Nos muestra que verdaderamente se ajusta muy bien ,con peque?os problemas en las colas.Prueba Anderson-Darling,
+ad.test(resestandar)
+@
+\\
+\\
+La grafica se adapta muy bien a la cura normal,exceptuando por un pico que sobresale por $1$ en el eje x, ya nos da buenos indicios de normalidad.Hacemos la Grafica probabilidad normal (QQ plot), la cual nos muestra que verdaderamente se ajusta muy bien,con pequeños problemas en las colas.Por ultimo hacimos la Prueba Anderson-Darling.
+\\
+Como el $p_valor=0.8715>0.05$, entonces podemos aceptar la normalidad en nuestro modelo.
+\\
+\\
+INDEPENDENCIA
+\\
+Prueba Durbin-Watson de Autocorrelaci\´on
+
+<<echo=F,warnings=F>>=
+dwtest(EPN9)
+@
+\\
+\\
+Esta es de las pruebas m\´as dificiles, pues con nada pudimos hace que se cumpliera , aunque si nos pudimos acercar mucho m\´as a dos con la transformada.Para el modelo sin transformar tenemos un dw=1.655 cercano a dos , pero podria indicar correlaci\´on positiva.  
+\\
+Ahora veamos cuales son las potencias que nos recomienda usar, donde nos dices la funci\´on powerTransform la mejor lambda y testTransform que lo mejor seria transformar nuestro modelo para mejorarlo.
+<<echo=F,warnings=F,results=hide>>=
+summary(res <- powerTransform(data_EPN9))
+lambda_ENP9<-c(0.7,28.7,0.1,1.1,-0.3,0.1,-0.7,.8,1.3,0.9,0.2,0.2,0.2,1.4,10.6,-.1,0.8,1.1,-.1,-0.3,-42.5,.4,.4)
+testTransform(res, lambda_ENP9)
+IND_115_t<-basicPower(IND_115,0.7)
+IND_063_t<-basicPower(IND_063,28.7)
+IND_802_t<-basicPower(IND_802,0.1)
+IND_117_t<-basicPower(IND_117,1.1)
+IND_055_t<-basicPower(IND_055,-0.3)
+IND_120_t<-basicPower(IND_120,0.1)
+IND_057_t<-basicPower(IND_057,-0.7)
+IND_070_t<-basicPower(IND_070,0.8)
+IND_119_t<-basicPower(IND_119,1.3)
+IND_087_t<-basicPower(IND_087,0.9)
+IND_813_t<-basicPower(IND_813,0.2)
+IND_125_t<-basicPower(IND_125,0.2)
+IND_076_t<-basicPower(IND_076,0.2)
+IND_061_t<-basicPower(IND_061,1.4)
+IND_062_t<-basicPower(IND_062,10.6)
+IND_126_t<-basicPower(IND_126,-0.1)
+Complejidad_t<-basicPower(Complejidad,0.8)
+IND_815_t<-basicPower(IND_815,1.1)
+IND_124_t<-basicPower(IND_124,-0.1)
+IND_002_t<-basicPower(IND_002,-0.3)
+IND_MI_t<-basicPower(MI_1,-42.5)
+IND_116_t<-basicPower(IND_116,0.4)
+IND_094_t<-basicPower(IND_094,0.4)
+@
+\\
+\\
+Este es el modelo con todas lasvariables transformadas el cual vemos que es un desastre , rompiendo significancia de betas y seguro de pruebas de normalidad ,etc.
+<<echo=F,warnings=F,results=hide>>=
+EPN9_trans<-lm(formula= EPN ~ IND_115_t+IND_063_t+IND_802_t+IND_117_t+IND_055_t+IND_120_t+IND_057_t+IND_070_t+IND_119_t+IND_087_t+IND_813_t+IND_125_t+IND_076_t+IND_061_t+IND_062_t+IND_126_t+Complejidad_t+IND_815_t+IND_124_t+IND_002_t+IND_MI_t+IND_116_t+IND_094_t,data = INEGI_INE_TRAIN)
+summary(EPN9_trans)
+vif(EPN9_trans)
+@
+\\
+\\
+En cambio este modelo se consiguio siguiendo las sugerencias y se gano un mayor acercamento en la prueba dw, con $dw=1.7546$, con todos los demas supuestos bien , y con variables significativas, en este caso ViF de $IND\_070=10.46$,cercano a $10$,las variables transformadas son: 
+\\
+$IND_063,IND_802,IND_070,IND_119,IND_087,IND_813,IND_125$
+$IND_076,IND_062,COMPLEJIDAD,IND_815,IND_124,MI,IND_094$.
+<<echo=F,warnings=F,results=hide>>=
+EPN9_trans_1<-lm(formula= EPN ~ IND_115+IND_063_t+IND_802_t+IND_117+IND_055+IND_120+IND_057+IND_070_t+IND_119_t+IND_087_t+IND_813_t+IND_125_t+IND_076_t+IND_061+IND_062_t+IND_126+Complejidad_t+IND_815_t+IND_124_t+IND_002+IND_MI_t+IND_116+IND_094_t,data = INEGI_INE_TRAIN)
+summary(EPN9_trans_1)
+vif(EPN9_trans_1)
+dwtest(EPN9_trans_1)
+resestandar_trans<-rstandard(EPN9_trans_1)
+vajustados_trans<-fitted(EPN9_trans_1) 
+ad.test(resestandar)
+bptest(EPN9)
+@
+\\
+\\
+Por ultimo veamos el Aic de estos tres modelos y veamos sus pros y contras.
+<<echo=F,warnings=F>>=
+AIC(EPN9,EPN9_trans,EPN9_trans_1)
+@
+\\
+\\
+Ahora veamos los pros y contras del modelo transformado y sin trnsformar .En primera el modelo no tranformado casi todas sus variables son significativas a cualquier nivel con un $R2$ ajustada de $0.59$,todas sus varibles tienen vif menor que $1a0$ excepciÓn de $IND\_070$ con $10.3$ , psa la prueba de A\_D con un $$p\_value=0.8715$$. Y la prueba de homosedasticidad con $p\_value=0.3233$,mientras que en la prueba de $DW=1.655$, lo cual nos dice que podria tener correlaci\´on cero ya que es cercano a 2 , ademas sus variables son interpretables pues no han sufrido transformaciones.Por otra parte el modelo transformado sufre de una interpretci\´on menos fuerte de sus variables , la mayoria de sus variables son significativas a cualquier nivel , nuevamente los vifs son vajos a exepci\´on de $IND\_070$ con $10.46$,mejora en la prueba de $DW=1.7546$ , diciendonos que aqui lo m\´as seguro que la correlaci\´on sea cero,la prueba de Anderson Darling la pasa con $p\_value=0.8715$ y la de Homosedasticidad la pasa con un $p_value=0.3672$.Si fuera por mi me quedaria con el modelo sin transformar, aunque tampoco esta de más analizar estos dos modelos tan interesantes.
+\\
+\\
+Veamos también si hay valores atipicos o influyentes.
+<<echo=F,fig=T,warnings=F>>=
+par(mfrow =c(1,1))
+resmodEPN9<-rstandard(EPN9)
+Boxplot(resmodEPN9,col="lightgray")
+inflm.EPN9 <- influence.measures(EPN9)
+which(apply(inflm.EPN9$is.inf, 1, any)) 
+summary(inflm.EPN9) 
+plot(EPN9, which = 5) 
+infIndexPlot(EPN9, vars = "Cook")
+@
+\\
+Podemos ver que aparentemente hay $4$ puntos discrepantes $(33, 230, 231, 253)$, el Diagnostico de influencia esta representado por influence.measures y
+el summary nos muestra que observaciones se pueden considerar como influyentes,aunque al final ninguna la podemos considerar como tal.
+\\
+Ahora veamos que tal nuestro modelo precide los datos de predicci\´on
+<<echo=F,fig=T,warnings=F>>=
+pred<-predict.lm(EPN9,newdata = INEGI_INE_PRED, interval="prediction", level=0.95) 
+y_min <- min(pred)
+y_max <- max(pred)
+pred
+m <- nrow(INEGI_INE_PRED)
+par(mfrow = c(1, 2))
+
+plot(1:m,pred[,1], type = "l", lwd = 2, ylim = c(y_min, y_max), 
+     ylab = "PredicciÃ³n", xlab = "??ndice") 
+lines(1:m, pred[,2], lwd = 2, col = "blue")
+lines(1:m, pred[,3], lwd = 2, col = "blue")
+lines(1:m, INEGI_INE_PRED[,"EPN"], lwd = 2, col = "red")
+
+@
+\\
+\\
+Vemos que los resultados son muy bueno , as\´i que podemos considerar muy bueno nuestro modelo sin transformar, hagmos lo mismo con el modelo transformado. 
+<<echo=F,warnings=F,results=hide>>=
+attach(INEGI_INE_PRED)
+MI_1<-MI+1
+summary(EPN9_trans_1)
+BD_EPN_pr <- data.frame(IND_115, IND_063, IND_802, IND_117, 
+    IND_055, IND_120, IND_057, IND_070, IND_119, IND_087, 
+    IND_813, IND_125, IND_076, IND_061, IND_062, 
+    IND_126, Complejidad, IND_815, IND_124, IND_002, 
+    MI_1, IND_116, IND_094)
+
+lambda_ENP9<-c(0.7,28.7,0.1,1.1,-0.3,0.1,-0.7,.8,1.3,0.9,0.2,0.2,0.2,1.4,10.6,-.1,0.8,1.1,-.1,-0.3,-42.5,.4,.4)
+#transformamos las variables
+IND_115_t<-basicPower(IND_115,0.7)
+IND_063_t<-basicPower(IND_063,28.7)
+IND_802_t<-basicPower(IND_802,0.5)
+IND_117_t<-basicPower(IND_117,1.1)
+IND_055_t<-basicPower(IND_055,-0.3)
+IND_120_t<-basicPower(IND_120,0.1)
+IND_057_t<-basicPower(IND_057,-0.7)
+IND_070_t<-basicPower(IND_070,0.8)
+IND_119_t<-basicPower(IND_119,1.3)
+IND_087_t<-basicPower(IND_087,0.9)
+IND_813_t<-basicPower(IND_813,0.2)
+IND_125_t<-basicPower(IND_125,0.2)
+IND_076_t<-basicPower(IND_076,0.2)
+IND_061_t<-basicPower(IND_061,1.4)
+IND_062_t<-basicPower(IND_062,10.6)
+IND_126_t<-basicPower(IND_126,-0.1)
+Complejidad_t<-basicPower(Complejidad,0.8)
+IND_815_t<-basicPower(IND_815,1.1)
+IND_124_t<-basicPower(IND_124,-0.1)
+IND_002_t<-basicPower(IND_002,-0.3)
+IND_MI_t<-basicPower(MI_1,-42.5)
+IND_116_t<-basicPower(IND_116,0.4)
+IND_094_t<-basicPower(IND_094,0.4)#bas
+@
+\\
+\\
+\\
+\\
+\\
+\textbf{Josefina V\'azquez Mota}
+Primero realizaremos un modelo tomando como variable dependiente JVM y las demas como independientes
+Los datos de las variables provendr\'an de INEGI\_INE\_TRAIN
+<<echo=F,include=F, results=hide>>==
+
+#JVM
+JVM<-lm(INEGI_INE_TRAIN$JVM ~ ., data = INE1)
+summary(JVM)
+ #Notamos que esta prueba no es de utilidad en este momento pues no todoas las variables son linealmente independietes
+@
+Podemos ver que este modelo cubre una ADJ $R^{2}= 74.52$ sin embargo podemos notar que el p-value de la mayoria de las variables es > 0.05 asi como en algunas tenemos datos NA
+Realizando vif, concluimos que este no nos es de utilidad en este momento, ya que no hemos corroborado que todas las variables sean Linealmente Independientes
+
+<<echo=F,include=T>>==
+#contriur JVM.vacio paratener el modelo vacio
+JVM.vacio<-lm(JVM~1,INEGI_INE_TRAIN)
+#y el completo donde se integran todas las variables explicativas
+JVM.completo<-lm(INEGI_INE_TRAIN$JVM ~ ., data = INE1)
+@
+Construimos un modelo vacio "JVM.vacio" y un modelo donde iremos integrando las variables explicativas "JVM.completo"
+
+<<echo=F,include=F, results=hide>>==
+#metodo Stepwise
+JVM1<-step(JVM.vacio, scope=list(lower=JVM.vacio,upper=JVM.completo), direction = "both") 
+summary(JVM1)#con esto quitamos varias variables, pero ahora veamos que sucede con el vif
+vif(JVM1)
+@
+Utilizamos el algoritmo Stepwise para escoger un modelo con AIC.
+Revisaremos el vif del modelo por AIC y procederemos a retirar una variable cuyo resultado sea $> 10$, en este caso $IND\_810$ que fue la mas alta con un valor de $1232.187721$ .
+
+
+<<echo=F,include=F, results=hide>>==
+JVM2<-lm(formula = JVM ~ IND_115 + IND_106 + IND_122 + IND_107 + IND_094 + IND_818 + 
+    IND_047 + IND_116 + IND_065 + IND_068 + IND_108 + IND_092 + IND_112 + IND_141 + IND_062 + 
+    IND_061 + IND_063 + IND_049 + IND_058 + IND_082 + IND_054 + IND_806 + IND_803 + IND_816 + 
+    IND_073 + IND_815 + Indigena + IND_064 + IND_048 + IND_072, data = INEGI_INE_TRAIN)
+summary(JVM2)
+vif(JVM2)
+
+JVM3<-lm(formula = JVM ~ IND_115 + IND_106 + IND_122 + IND_107 + IND_094 + IND_818 + 
+    IND_047 + IND_116 + IND_068 + IND_108 + IND_092 + IND_112 + IND_141 + IND_062 + 
+    IND_061 + IND_063 + IND_049 + IND_058 + IND_082 + IND_054 + IND_806 + IND_803 + IND_816 + 
+    IND_073 + IND_815 + Indigena + IND_064 + IND_048 + IND_072, data = INEGI_INE_TRAIN)
+summary(JVM3)
+vif(JVM3)
+
+JVM4<-lm(formula = JVM ~ IND_115 + IND_106 + IND_122 + IND_107 + IND_094 + IND_818 + 
+    IND_047 + IND_116 + IND_108 + IND_092 + IND_112 + IND_141 + IND_062 + 
+    IND_061 + IND_063 + IND_049 + IND_058 + IND_082 + IND_054 + IND_806 + IND_803 + IND_816 + 
+    IND_073 + IND_815 + Indigena + IND_064 + IND_048 + IND_072, data = INEGI_INE_TRAIN)
+summary(JVM4)
+vif(JVM4)
+
+JVM5<-lm(formula = JVM ~ IND_115 + IND_122 + IND_107 + IND_094 + IND_818 + 
+    IND_047 + IND_116 + IND_108 + IND_092 + IND_112 + IND_141 + IND_062 + 
+    IND_061 + IND_063 + IND_049 + IND_058 + IND_082 + IND_054 + IND_806 + IND_803 + IND_816 + 
+    IND_073 + IND_815 + Indigena + IND_064 + IND_048 + IND_072, data = INEGI_INE_TRAIN)
+summary(JVM5)
+vif(JVM5)#ya no hay mas variables con vif mayor a 10, veamos si se puede reducir m?s el modelo
+@
+El modelo se reduce utilizando AIC, esto lo realizamos con el algoritmo Stepwise
+Seguido de esto, analizamos el vif para cada modelo en busca de uno > 10, se escoge el valor mas grande y este es eliminado del modelo simpre y cuando la varianza predecida por el modelo no disminuya abruptamente
+Una vez ya no haya vif > 10 procederemos a correr el algoritmo step para ver si se puede reducir m\'as nuestro modelo
+
+<<echo=F,include=T,results=hide>>==
+JVM6<- step(JVM.vacio, scope=list(lower=JVM.vacio,upper=JVM5), direction = "both") 
+summary(JVM6)#Por lo que este seria nuestro modelo final
+vif(JVM6)
+@
+Utilizamos el algoritmo Stepwise para escoger un modelo con AIC.
+Revisaremos el vif del modelo por AIC y procederemos a retirar una variable cuyo resultado sea > 10, en este caso IND_810 que fue la mas alta con un valor de 1232.187721 .
+
+Tenemos nuestro primer candidato a modelo final
+Podemos ver que este modelo cubre una ADJ $R^{2}= 70.04$ notando una leve disminuci\'on
+Tambien podemos recalcar que ya se presenta un buen p-value en las variables
+Nuestro modelo est\'a constituido por las siguientes variables:\\
+IND\_806---- Estimador del total de poblaci\'on de 18 años y m\'as\\
+IND\_115---- Porcentaje de la poblaci\'on de 12 años y m\'as separada\\
+IND\_818---- Porcentaje de poblaci\'on de 0 a 9 años\\
+IND\_122---- Porcentaje de la poblaci\'on afiliada al ISSSTE\\
+IND\_094---- Porcentaje de la poblaci\'on de 15 a 24 años que asiste a la escuela en un municipio o delegaci\'on distinto al de residencia\\
+IND\_047---- Densidad de poblaci\'on (hab/km2)\\
+IND\_061---- Porcentaje de viviendas con disponibilidad de agua entubada en la vivienda\\
+IND\_082---- Porcentaje de poblaci\'on de 15 años y más con nivel de escolaridad media superior\\
+IND\_108---- Porcentaje de la PNEA en otras actividades no econ\'omicas\\
+IND\_062---- Porcentaje de viviendas con disponibilidad de drenaje en la vivienda\\
+IND\_141---- Porcentaje de la poblaci\'on que se considera ind\'igena\\
+IND\_049---- Porcentaje de la poblaci\'on que tiene acta de nacimiento\\
+Indigena---- Identificador de distrito ind\'igena\\
+IND\_058---- Porcentaje de viviendas con piso de tierra\\
+IND\_092---- Porcentaje de la poblaci\'on de 6 a 11 años que asiste a la escuela en un municipio o delegaci\'on distinto al de residencia\\
+IND\_064---- Porcentaje de viviendas con disponibilidad de electricidad en la vivienda\\
+IND\_048---- Porcentaje de la poblaci\'on que no tiene nacionalidad mexicana\\
+IND\_072---- Porcentaje de viviendas con calentador solar\\
+IND\_116---- Porcentaje de la poblaci\'on de 12 años y más divorciada\\
+
+
+
+\textbf{Transformaciones}
+Primero crearemos una base de datos utilizando las variables necesarias para nuestro modelo base que es "JVM6" estos datos proveendr\'an de INEGI_INE_TRAIN
+<<echo=false,include=FALSE, warnings=F>>=
+#Transformemos las variables para poder mejorar el modelo
+
+attach(INEGI_INE_TRAIN)
+BD_JVM0 <- data.frame(INEGI_INE_TRAIN$JVM, IND_806, IND_115, IND_818, IND_122, IND_094, IND_047, IND_061, IND_082, IND_108, IND_062, IND_141, IND_049, Indigena, IND_058, IND_092, IND_064, IND_048, IND_072, IND_116) #Creamos una base con las variables de JVM6
+@
+
+
+Veremos que las variables sean $> 0$, de no ser asi las retiraremos
+<<echo=false,include=FALSE, warnings=F>>=
+summary(BD_JVM0) #Veamos que las variables sean > 0
+BD_JVM <- data.frame(INEGI_INE_TRAIN$JVM, IND_806, IND_115, IND_818, IND_122, IND_094, IND_047, IND_061, IND_082, IND_108, IND_062, IND_141, IND_049,  IND_058, IND_064, IND_048, IND_072, IND_116)  #Quitamos las variables que tengan Min =0
+@
+Observamos que tanto Indigena como IND_092 tienen al menos un valor $= 0$ por lo que quitaremos estas $2$
+
+
+Utilizaremos la funcion powerTransform para obtener una lambda para transformar cada variable
+<<echo=false, warnings=F, results=hide>>=
+summary(pt1 <- powerTransform(BD_JVM))
+pt1
+##lambda_JVM6 <- c(0.5143, 0.5913, 0.5193, 0.9655, 0.1406, 0.3680, -0.0190, 1.5197, 0.8374, 0.2590, 11.8200, -0.0337, 71.7666, 0.1809, 89.5276, 0.0060, 0.0319, 0.3531)
+lambda_JVM6 <- c(0.5, 1, 0.5, 1, 0, 0.33, 0, 1.52, 1, 0, 11.82, 0, 71.77, 0.18, 89.53, 0, 0, 0.33)
+testTransform(pt1, lambda_JVM6) #Vemos que si se pueden hacer las transformaciones
+IND_806_tr<-basicPower(IND_806,1)
+IND_115_tr<-basicPower(IND_115,0.5)
+IND_818_tr<-basicPower(IND_818,1)
+IND_122_tr<-log(IND_122)
+IND_094_tr<-basicPower(IND_094,0.33)
+IND_047_tr<-log(IND_047)
+IND_061_tr<-basicPower(IND_061,1.52)
+IND_082_tr<-basicPower(IND_082,1)
+IND_108_tr<-log(IND_108)
+IND_062_tr<-basicPower(IND_062,11.82)
+IND_141_tr<-log(IND_141)
+IND_049_tr<-basicPower(IND_049,71.77)
+IND_058_tr<-basicPower(IND_058,0.18)
+IND_064_tr<-basicPower(IND_064,89.53)
+IND_048_tr<-log(IND_048)
+IND_072_tr<-log(IND_072)
+IND_116_tr<-basicPower(IND_116,0.33)
+@
+
+<<echo=false, warnings=F>>=
+JVM1_trans<- lm(formula = JVM ~ IND_806 + IND_115 + IND_818 + IND_122 + IND_094 + IND_047_tr + IND_061 + IND_082 + IND_108 + IND_062_tr + IND_141_tr + IND_049_tr + IND_058 + IND_064 + IND_048_tr + IND_072 + IND_116_tr, data = INEGI_INE_TRAIN)
+#Realizamos la transformacion aplicandose la solamente a algunas variables
+summary(JVM1_trans)
+#Este modelo explica el 67.07% 
+#Tambien podemos notar que IND_058, IND_064, IND_048_tr, IND_072, IND_116_tr
+#presentan un p-value alto por lo que no rechazan la Hip\'otesis nula i.e. parece 
+#que beta_13 = 0, beta_14 = 0, beta_15 = 0, beta_16 = 0, beta_17 = 0.
+@
+Este modelo explica una $R^2$ de $67.07\%$
+Tambien podemos notar que $IND\_058$, $IND\_064$, $IND\_048\_tr$, $IND\_072$, $IND\_116\_tr$ presentan un p-value alto por lo que no rechazan la Hip\'otesis nula i.e. pareceque $beta\_13 = 0$, $beta\_14 = 0$, $beta\_15 = 0$, $beta\_16 = 0$, $beta\_17 = 0.$
+\\
+Proseguimos a crear una base de datos con las variables de JVM1\_trans para luego poder analizar si se correlacionan.
+<<echo=false,include=FALSE, warnings=F>>=
+BD_JVM_trans <- data.frame(IND_806, IND_115, IND_818, IND_122, IND_094, IND_047_tr, IND_061, IND_082, IND_108, IND_062_tr, IND_141_tr, IND_049_tr, IND_058, IND_064, IND_048_tr, IND_072, IND_116_tr)
+#Creamos una base de datos con las variables para poder analizar despues si correlacion
+@
+
+<<echo=false, warnings=F>>=
+JVM_trans<- lm(formula = JVM ~ IND_806_tr + IND_115_tr + IND_818_tr + IND_122_tr + IND_094_tr + IND_047_tr + IND_061_tr + IND_082_tr + IND_108_tr + IND_062_tr + IND_141_tr + IND_049_tr + IND_058_tr + IND_064_tr + IND_048_tr + IND_072_tr + IND_116_tr, data = INEGI_INE_TRAIN) #Realizamos el modelo con las variables transformadas
+summary(JVM_trans)
+@
+\\
+\\
+Realizamos un modelo con las variables transformadas y lo llamamos JVM\_trans
+Podemos ver que t\-value de $IND\_064\_tr$ tiende a \-Inf, por lo que la retiraremos ya que impide realizar vif
+Este modelo explica el $66.73\%$.
+
+
+<<echo=false, warnings=F>>=
+JVM_trans<- lm(formula = JVM ~ IND_806_tr + IND_115_tr + IND_818_tr + IND_122_tr + IND_094_tr + IND_047_tr + IND_061_tr + IND_082_tr + IND_108_tr + IND_062_tr + IND_141_tr + IND_049_tr + IND_058_tr + IND_048_tr + IND_072_tr + IND_116_tr, data = INEGI_INE_TRAIN)
+summary(JVM_trans)
+#Este modelo explica el 65.97% Notando que disminuye, pero no considerablemente
+@
+\\
+\\
+Podemos ver que el modelo tiene una $R^2$ de $65.97$ notando que disminuye, pero no considerablemente
+
+
+<<echo=F,include=F, results=hide>>==
+step(object = JVM_trans, direction = "both", trace = 1) #Realizamos AIC para el nuevo modelo
+JVM.trans<- lm(formula = JVM ~ IND_806_tr + IND_115_tr + IND_818_tr + IND_122_tr + 
+    IND_094_tr + IND_047_tr + IND_061_tr + IND_082_tr + IND_108_tr + 
+    IND_062_tr + IND_141_tr + IND_049_tr + IND_058_tr + IND_048_tr + 
+    IND_072_tr, data = INEGI_INE_TRAIN)
+vif(JVM.trans) #corroboramos que los Vif sigan siendo menor a 10
+summary(JVM.trans)
+@
+Volvemos a correr el algoritmo Stepwise, ahora para JVM\_trans, llegando a un nuevo modelo, posteriormente corremos vif para buscar valores $> 10$ notando que no hay ninguno.
+\\
+LLamamos a este modelo JVM.trans.
+\\
+Este modelo explica el $65.93$ Notando una leve disminucion
+Tambien podemos notar que $IND\_058\_tr$, $IND\_048\_tr$, $IND\_072\_tr presentan un p\-value alto por lo que no rechazan la Hip\'otesis nula i.e. parece que $beta\_13 = 0$, $beta\_14 = 0$, $beta\_15 = 0$.
+\\
+Proseguimos a crear una base de datos con las variables de JVM1\_trans para luego poder analizar si se correlacionan
+<<echo=false,include=FALSE, warnings=F>>=
+BD_JVM.trans <- data.frame(IND_806_tr, IND_115_tr, IND_818_tr, IND_122_tr, 
+    IND_094_tr, IND_047_tr, IND_061_tr, IND_082_tr, IND_108_tr, 
+    IND_062_tr, IND_141_tr, IND_049_tr, IND_058_tr, IND_048_tr, 
+    IND_072_tr)
+par(mfrow=c(2,2))
+plot(JVM.trans)
+@
+
+
+<<echo=F, warnings=F>>=
+library(MASS)
+lt <- logtrans(JVM6, alpha = seq(0.75, 6.5, len=20))
+JVM6.invi <- lm(log(JVM+4.1186) ~ IND_806 + IND_115 + IND_818 + IND_122 + IND_094 + 
+    IND_047 + IND_061 + IND_082 + IND_108 + IND_062 + IND_141 + 
+    IND_049 + Indigena + IND_058 + IND_092 + IND_064 + IND_048 + 
+    IND_072 + IND_116 , data = INEGI_INE_TRAIN) #Reaizamos la transformacion con la /alpha obtenida
+summary(JVM6.invi)
+@
+Corremos el algoritmo logtrans para encontrar un \alpha para realizar la transformacion logaritmica.
+\\
+Este modelo explica el $66.25$ notando un leve aumento de $R^2$ 
+Podemos notar que $IND\_072$ y $IND\_116$ presenta un $p\-value$ alto por lo que no rechaza la Hip\'otesis nula i.e. parece que $beta\_18 = 0$ , $beta\_19 = 0$.
+
+<<echo=false, warnings=F>>=
+bc=boxcox(JVM6, lambda = seq(-3.25, 3.25, length = 10)) #Utilizamos boxcox para
+#encontrar una \lambda conveniente para transformar nuestro modelo
+best.lam=bc$x[which(bc$y==max(bc$y))] #nuestra \lambda para el modelo es de 
+#.55808080
+JVM6.inv <- lm((JVM)^0.55808080 ~ IND_806 + IND_115 + IND_818 + IND_122 + IND_094 + 
+    IND_047 + IND_061 + IND_082 + IND_108 + IND_062 + IND_141 + 
+    IND_049 + Indigena + IND_058 + IND_092 + IND_064 + IND_048 + 
+    IND_072 + IND_116 , data = INEGI_INE_TRAIN) #Reaizamos la transformacion con la
+# \lambda obtenida
+summary(JVM6.inv)
+@
+Realizamos el algoritmo de boxcox para encontrar una lambda para poder realizar una transformacion del tio $Y^l$
+\\
+Este modelo explica el $70.09$ notando un leve aumento de $R^2$ 
+\\
+Notemos que el intercepto tiene un p-value alto por lo que no rechaza la Hip\'otesis nula i.e. parece ser que $beta\_0 =0$
+\\
+Tambien podemos notar que $IND\_116$ presenta un p-value alto por lo que no rechaza la Hip\'otesis nula i.e. parece que $beta\_19 = 0$.
+\\
+\\
+Comprobaremos los supuestos para los 5 modelos
+MODELOS:
+JVM6
+JVM6.inv
+JMS.invi
+JVM1\_trans
+JVM.trans
+\\
+\\
+MULTICOLINEALIDAD
+Ya que JVM6, JVM6.inv, JVM6.invi presentan variables sin transformar, basta con analizar la correlacion entre las variables de BD\_JVM0
+Para JVM1\_trans y JVM.trans analizaremos por separado su correlacion
+<<echo=false, fig=T,warnings=F,results=hide>>=
+corr=cor(BD_JVM0)
+corr
+corr_trans=cor(BD_JVM_trans)
+corr_trans
+corr.trans=cor(BD_JVM.trans)
+corr.trans
+par(mfrow =c(2,2))
+require(corrplot)
+corrplot(round(cor(BD_JVM0), digits = 3), type = "lower")
+require(corrplot)
+corrplot(round(cor(BD_JVM_trans), digits = 3), type = "lower")
+require(corrplot)
+corrplot(round(cor(BD_JVM.trans), digits = 3), type = "lower")
+@
+Observemos que hay correlaciones muy altas entre las variables para los 3 casos por lo que analizaremos sus vif
+
+<<echo=false, warnings=F>>=
+vif(JVM6)
+vif(JVM6.inv)
+vif(JVM6.invi)
+vif(JVM1_trans)
+vif(JVM.trans)
+@
+\\
+\\
+Analizando los vif para cada uno de los 5 modelos, vemos que no hay ninguno superior a $10$
+Analizando esto podemos intuir que no hay multicolinealidad
+\\
+\\
+HOMOSEDASTICIDAD
+<<echo=false, fig=T,warnings=F>>=
+resestandar<-rstandard(JVM6) 
+resestandar.inv<-rstandard(JVM6.inv)
+resestandar.invi<-rstandard(JVM6.invi)
+resestandar_trans<-rstandard(JVM1_trans)
+resestandar.trans<-rstandard(JVM.trans)
+vajustados<-fitted(JVM6) 
+vajustados.inv<-fitted(JVM6.inv) 
+vajustados.invi<-fitted(JVM6.invi)
+vajustados_trans<-fitted(JVM1_trans)
+vajustados.trans<-fitted(JVM.trans)
+par(mfrow =c(2,2))
+#Graficamos para ver si la varianza es constante 
+plot(vajustados,resestandar, pch=20, 
+     main="Grafica para comprobar homoscedasticidad de JVM6",ylim = c(-3,3))
+abline(h=qnorm(0.975,0,1)*sd(resestandar),col="lightblue",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandar),col="lightblue",lwd=3)
+
+plot(vajustados.inv,resestandar.inv, pch=20, 
+     main="Grafica para comprobar homoscedasticidad de JVM6.inv",ylim = c(-3,3))
+abline(h=qnorm(0.975,0,1)*sd(resestandar.inv),col="lightgreen",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandar.inv),col="lightgreen",lwd=3)
+
+plot(vajustados.invi,resestandar.invi, pch=20, 
+     main="Grafica para comprobar homoscedasticidad de JVM6.invi",ylim = c(-3,3))
+abline(h=qnorm(0.975,0,1)*sd(resestandar.invi),col="purple",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandar.invi),col="purple",lwd=3)
+
+plot(vajustados_trans,resestandar_trans, pch=20, 
+     main="Grafica para comprobar homoscedasticidad de JVM1_trans",ylim = c(-3,3))
+abline(h=qnorm(0.975,0,1)*sd(resestandar_trans),col="yellow",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandar_trans),col="yellow",lwd=3)
+
+plot(vajustados.trans,resestandar.trans, pch=20, 
+     main="Grafica para comprobar homoscedasticidad de JVM.trans",ylim = c(-3,3))
+abline(h=qnorm(0.975,0,1)*sd(resestandar.trans),col="gray",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandar.trans),col="gray",lwd=3)
+@
+Podemos ver que los 5 modelos tienen varianza mas o menos constante segun sus gr\'aficas
+Realizamos una prueba Breusch-Pagan para comprobar la Homocedasticidad, se busca que obtengamos un $p\-value > 0.05$
+\\
+Prueba Homosedasticidad
+<<echo=false, warnings=F>>=
+bptest(JVM6)
+#Nos arroja un p-value de0.005075
+bptest(JVM6.inv)
+#Nos arroja un p-value de0.003011
+bptest(JVM6.invi)
+#Nos arroja un p-value de 0.2204
+bptest(JVM1_trans)
+#Nos arroja un p-value de 0.08667
+bptest(JVM.trans)
+#Nos arroja un p-value de 0.07329
+@
+Vemos que solo $JVM1\_trans$ y JVM.trans cumple con Homocedasticidad, aun cuando JVM6.invi en la grafica parece cumplirlo de igual manera
+\\
+NORMALIDAD
+Realizaremos una prueba Anderson-Darling para corroborar normalidad
+Buscamos que la prueba sobre los residuos nos arroje un $p-value > 0.05$
+<<echo=false, warnings=F>>=
+ad.test(resestandar)
+#Nos arroja un p-value de 0.5114
+ad.test(resestandar.inv)
+#Nos arroja un p-value de 0.0176
+ad.test(resestandar.invi)
+#Nos arroja un p-value de 2.138e-06
+ad.test(resestandar_trans)
+#Nos arroja un p-value de 0.5704
+ad.test(resestandar.trans)
+#Nos arroja un p-value de 0.7322
+@
+Estos valores, junto con las graficas QQ plot, nos indican que solo los residuos de JVM6, JVM\_trans y JVM.trans se distribuyen Normal
+\\
+INDEPENDENCIA
+Prueba Durbin-Watson de Autocorrelaci\'on
+<<echo=false, warnings=F>>=
+dwtest(JVM6)
+#Nos da un DW = 1.5413
+dwtest(JVM6.inv)
+#Nos da un DW = 1.4751
+dwtest(JVM6.invi)
+#Nos da un DW = 1.3892
+dwtest(JVM1_trans)
+#Nos da un DW = 1.5123
+dwtest(JVM.trans)
+#Nos da un DW = 1.4606
+@
+Estos DW's son relativamente cercanos a 2 en especial para JVM1\_trans, por lo que podemos decir que no hay autocorrelacion residual por lo que entonces son independientes
+\\
+Ya que solo JVM1\_trans y JVM.trans cumplio con todos los supuestos, nos quedaremos con JVM1\_trans ya que es el que tiene una $R^2$ mayor y pasa todos los supuestos
+\\
+\\
+<<echo=false, warnings=F>>=
+modeloJVM <- JVM1_trans
+@
+\\
+\\
+Puntos discrepantes e influyentes
+<<echo=false, fig=T,warnings=F>>=
+par(mfrow =c(1,1))
+resmodJVM<-rstandard(modeloJVM)
+Boxplot(resmodJVM,col="lightgray")
+#Diagnostico de influencia
+inflm.JVM <- influence.measures(modeloJVM)
+which(apply(inflm.JVM$is.inf, 1, any)) 
+summary(inflm.JVM) #Nos uestra que observaciones se pueden considerar como influyentes
+plot(modeloJVM, which = 5) 
+infIndexPlot(modeloJVM, vars = "Cook") 
+@
+Podemos ver que aparentemente hay 4 puntos discrepantes $(33, 230, 231, 253)$
+Podemos ver que ninguna distancia es $>0.5$ por lo que no tenemos dato atipicos e infliyentes.
+\\
+\\
+Ahora haremos el modelo bajo las variables predictorias
+<<echo=false, warnings=F, results=hide>>=
+attach(INEGI_INE_PRED)
+BD_JVM_pr <- data.frame(INEGI_INE_PRED$JVM, IND_806, IND_115, IND_818, IND_122, IND_094, IND_047, IND_061, IND_082, IND_108, IND_062, IND_141, 
+IND_049, IND_058, IND_064, IND_048, IND_072, IND_116) #Creamos una base con las variables de modeloJVM
+#Realizamos las transformaciones necesarias
+IND_806_tr<-basicPower(IND_806,1)
+IND_115_tr<-basicPower(IND_115,0.5)
+IND_818_tr<-basicPower(IND_818,1)
+IND_122_tr<-log(IND_122)
+IND_094_tr<-basicPower(IND_094,0.33)
+IND_047_tr<-log(IND_047)
+IND_061_tr<-basicPower(IND_061,1.52)
+IND_082_tr<-basicPower(IND_082,1)
+IND_108_tr<-log(IND_108)
+IND_062_tr<-basicPower(IND_062,11.82)
+IND_141_tr<-log(IND_141)
+IND_049_tr<-basicPower(IND_049,71.77)
+IND_058_tr<-basicPower(IND_058,0.18)
+IND_064_tr<-basicPower(IND_064,89.53)
+IND_048_tr<-log(IND_048)
+IND_072_tr<-log(IND_072)
+IND_116_tr<-basicPower(IND_116,0.33)
+@
+\\
+\\
+Ahora valuamos el modelo con INEGI\_INE\_PRED
+<<echo=false, fig=T,warnings=F>>=
+pred.JVM <- predict.lm(modeloJVM, newdata = INEGI_INE_PRED , interval = "prediction", level = 0.95)
+y_min.JVM <- min(pred.JVM)
+y_max.JVM <- max(pred.JVM)
+summary(pred.JVM)
+m.JVM <- nrow(INEGI_INE_PRED)
+plot(1:m.JVM, pred.JVM[,1], type = "l", lwd = 2, ylim = c(y_min.JVM, y_max.JVM), 
+     ylab = "PredicciÃ³n", xlab = "Ã?ndice") 
+lines(1:m.JVM, pred.JVM[,2], lwd = 2, col = "blue")
+lines(1:m.JVM, pred.JVM[,3], lwd = 2, col = "blue")
+lines(1:m.JVM, INEGI_INE_PRED[,"JVM"], lwd = 2, col = "red")
+cbind(pred.JVM, INEGI_INE_PRED[,"JVM"])
+@
+Como podemos observar, en la grafica el modelo que se ajusto es bastante bueno para predecir nuestros datos de prediccion, por lo que podemos concluir que es un buen modelo
+\\
+\\
+INTERPRETACI\'ON DEL MODELO
+Dadas las variables que quitamos, el modelo para JVM se ve explicad por un total de 17 variables, de las cuales varias son de gente que cuenta con servicios b\'asicos en su vivienda, otra variable que pudimos notar es el de Porcentaje de la poblaci\´on de 12 aÃ±os y mÃ¡s divorciada y Porcentaje de la poblaci\´on de 12 años y mÃ¡s separada , estas con una \beta negativa esto tiene no sentido, puesto a las promesas de campaÃ±a que realizo, ya que estas apoyaban a madres solteras y trabajadoras.
+\\
+\\
+Finalmente, construiremos el mejor modelo que describa a los datos de candidado Andr\'es Manuel L\'opez Obrador (AMLO). Para ello, primero veamos como se comporta el modelo con todas las variables
+<<echo=false,eval=TRUE,results=hide>>=
+#AMLO
+AMLO<-lm(INEGI_INE_TRAIN$AMLO ~ ., data = INE1)
+summary(AMLO)
+@
+Con esto notamos que el modelo tiene una $R^2$ de 0.799, lo que nos describe un buen modelo, sin embargo tambien podemos observar que muchas variables no son significativas, por lo que haremos un estudio m\'as exhaustivo para ver si es necesario tener todas las variables, o podemos tener un modelo más simple con el cual se expliquen las observaciones. 
+
+<<echo=F,include=F, results=hide>>==
+AMLO.vacio<-lm(AMLO~1,INEGI_INE_TRAIN)
+AMLO.completo<-lm(INEGI_INE_TRAIN$AMLO ~ ., data = INE1)
+AMLO1<-step(AMLO.vacio, scope=list(lower=AMLO.vacio,upper=AMLO.completo), direction = "both")
+summary(AMLO1)
+#podemos eliminar varias variables, sin embargo continuemos para ver si se pueden eliminar mas
+vif(AMLO1)
+AMLO2<-lm(formula = AMLO ~ IND_074 + IND_115 + IND_087 + IND_121 + IND_047 + IND_815 + IND_082 + 
+    IND_119 + IND_114 + IND_067 + Complejidad + IND_112 + IND_804 + IND_818 + IND_095 + IND_068 +
+    IND_090 + IND_002 + IND_064 + IND_088 + IND_138 + IND_065 + IND_056 + IND_066, 
+    data = INEGI_INE_TRAIN)
+summary(AMLO2)
+
+vif(AMLO2)
+AMLO3<-lm(formula = AMLO ~ IND_074 + IND_115 + IND_087 + IND_121 + IND_047 + IND_815 + IND_082 + 
+    IND_119 + IND_114 + IND_067 + Complejidad + IND_112 + IND_804 + IND_818 + IND_095 + IND_068 +
+    IND_090 + IND_002 + IND_064 + IND_088 + IND_065 + IND_056 + IND_066, data = INEGI_INE_TRAIN)
+summary(AMLO3)
+
+vif(AMLO3)
+AMLO4<-lm(formula = AMLO ~ IND_074 + IND_115 + IND_087 + IND_121 + IND_047 + IND_815 + IND_082 + 
+    IND_119 + IND_114 + IND_067 + Complejidad + IND_112 + IND_804 + IND_818 + IND_095 + IND_065 +
+    IND_090 + IND_002 + IND_064 + IND_088 + IND_056 + IND_066, data = INEGI_INE_TRAIN)
+summary(AMLO4)
+
+vif(AMLO4)
+AMLO5<-lm(formula = AMLO ~ IND_074 + IND_115 + IND_087 + IND_121 + IND_047 + IND_815 + IND_082 + 
+    IND_119 + IND_114 + IND_067 + Complejidad + IND_112 + IND_804 + IND_818 + IND_095 +
+    IND_090 + IND_002 + IND_064 + IND_088 + IND_056 + IND_066, data = INEGI_INE_TRAIN)
+summary(AMLO5)
+
+vif(AMLO5)
+AMLO6<-lm(formula = AMLO ~ IND_074 + IND_115 + IND_087 + IND_121 + IND_047 + IND_815 + IND_082 + 
+    IND_119 + IND_067 + Complejidad + IND_112 + IND_804 + IND_818 + IND_095 + IND_090 +
+    IND_002 + IND_064 + IND_088 + IND_056 + IND_066, data = INEGI_INE_TRAIN)
+summary(AMLO6)
+
+vif(AMLO5)
+AMLO7<-lm(formula = AMLO ~ IND_074 + IND_115 + IND_087 + IND_121 + IND_047 + IND_815 + IND_082 + 
+    IND_119 + IND_067 + Complejidad + IND_804 + IND_818 + IND_095 + IND_090 +
+    IND_002 + IND_064 + IND_088 + IND_056 + IND_066, data = INEGI_INE_TRAIN)
+summary(AMLO7)
+
+vif(AMLO7)#ya no hay mas variables con vif mayor a 10, veamos si podemos reducir un poco mas el modelo
+@
+El modelo se reduce, usando el AIC, es decir se busca que en cada modelo el AIC disminuya, esto lo hacemos con la funci\'on step de R, y después se analisan los Vif, y al ser mayores a 10 se eliminan, esto simpre y cuando la varianza predecida por eel modelo no disminuya abruptamente;  finalmente se vuelve a utilizar la funci\'on step y con ella obtenemos el mejor modelo, que esta constituido por las variables:\\
+IND\_074-------Porcentaje de viviendas con separación de residuos\\
+IND\_115-------Porcentaje de la población de 12 años y más separada\\
+IND\_087-------Porcentaje de asistencia escolar de la población de 3 a 5 años\\
+IND\_047-------Densidad de población (hab/km2)\\
+IND\_815-------Porcentaje de la población ocupada que labora en el sector económico de comercio\\
+IND\_119-------Porcentaje de la población afiliada a servicios de salud\\
+IND\_082-------Porcentaje de población de 15 años y más con nivel de escolaridad media superior\\
+IND\_121-------Porcentaje de la población afiliada al IMSS\\
+IND\_804-------Estimador del total de población de 15 años y más (Mujeres)\\
+IND\_056-------Promedio de ocupantes por vivienda\\
+IND\_095-------Porcentaje de la población de 12 años y más económicamente activa (Total)\\
+Complejidad---Grupo de complejidad electoral\\
+IND\_002-------Porcentaje estatal de la población\\
+IND\_088-------Porcentaje de asistencia escolar de la población de 6 a 11 años\\
+IND\_064-------Porcentaje de viviendas con disponibilidad de electricidad en la vivienda\\
+Dicho modelotiene una $R^2 = 0.7766$, que es menor a la del modelo completo pero por muy poco, lo que nos hace llegar a la conclusi\'on de que s\'i es un mejor modelo, pues esta quitando muchas variables, pero a\'un as\'i describe casi la misma cantidad de varianza. 
+<<echo=false,eval=TRUE,results=hide>>=
+AMLO8<-step(AMLO.vacio, scope=list(lower=AMLO.vacio,upper=AMLO6), direction = "both")
+summary(AMLO8)#modelo final
+@
+Ahora bien, veamos si este modelo cumple con los supuestos de la regresión lineal m\'ultiple
+\\
+\textbf{Multicolinealidad}
+Para ver si se cumple este supuesto debemos ver si no existe correlaci\'on entre ellos, m\'as a\'un si el vif (variance inflation factor) es menor a 10
+<<echo=false,include=FALSE, warnings=F>>=
+#vamos si nos es conveniente hacer alguna transformacion 
+#revisemos los supuestos
+#MULTICOLINEALIDAD
+attach(INEGI_INE_TRAIN)
+BD_AMLO<-data.frame(INEGI_INE_TRAIN$AMLO,IND_074, IND_115, IND_087, IND_047, IND_815, IND_119,       IND_082, IND_121,IND_804, IND_056, IND_095, Complejidad, IND_002, IND_088, IND_064)
+@
+
+<<echo=false,include=TRUE, warnings=F>>=
+vif(AMLO8)
+@
+
+\textbf{Homosedasticidad}\\
+Para ver si este supuesto se cumple, primero veremos que sucede al graficar los residuos estandarizados, contra los valores ajustado. Como podemos observar en la gráfica siguiente, puede decirse que si es una gr\'afica nula, por lo que tendriamos varianza constante, es decir, la homocedasticidad si se cumple.\\
+<<echo=false,fig=true, warnings=F>>=
+#HOMOSEDASTICIDAD 
+resestandarAMLO<-rstandard(AMLO8) #residuos estandarizados
+vajustadosAMLO<-fitted(AMLO8) #valores ajustados
+#Graficamos para ver si la varianza es constante 
+plot(vajustadosAMLO,resestandarAMLO, pch=20, 
+     main="Grafica para comprobar homoscedasticidad",ylim = c(-3,3))
+abline(h=qnorm(0.975,0,1)*sd(resestandarAMLO),col="red4",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandarAMLO),col="red4",lwd=3)
+#Podemos ver que mas o menos constante, hagamos una prueba mas formal para estar seguros
+@
+\\Hagamos la prueba formal para ver si la homesedasticidad se cumple:
+<<echo=false, warnings=F>>=
+#Prueba Homosedasticidad
+bptest(AMLO8)
+#Esta prueba hace H_0:Hay poca variabilidad en los valores que 
+#toma la varianza vs H_1:Hay mucha variabilidad entonces la prueba 
+#nos arroja un p-value del 0.004668<<0.05 por lo que no se acepta la homosedastisidad, tendremos que verificar más adelante con una transformacion
+@
+Como podemos observar, el p\-valor es mucho m\'as pequeño que el nivel de significancia 0.05, por lo que se puede afirmar que no se cumple el supuesto de varianza constante, m\'as adelante se tratar\'a de arreglar dicho supuesto con una transformaci\'on.\\
+\textbf{Normalidad}\\
+Al igual que para la prueba anterior, primero se har\'a una prueba gr\'afica\\
+<<echo=false,fig=true, warnings=F>>=
+#Grafica probabilidad normal (QQ plot)
+qqnorm(resestandarAMLO,main="QQ-Plot de Residuos", pch=19,
+       xlab="Cuantiles Teoricos", ylab="Cuantiles Muestrales",
+       col="blue3")
+qqline(resestandarAMLO,col="Red",lwd=3)
+#Este grafico nos indica que parece que los datos se ajustan en el
+#centro de la distribucion pero parece que hay problemas en una de las colas
+@
+\\Este gr\'afico nos indica que los datos se ajustan bien en el centro de la distritribuci\'on y en la cola izquierda, sin embargo la cola derecha se ve que podria ocasionarnos problemas\\
+Ahora bien, al hacer la prueba formal obtenemos:\\
+<<echo=false, warnings=F>>=
+#Prueba Anderson-Darling, la mas potente de para la normalidad
+ad.test(resestandarAMLO)
+#Esta prueba nos dice que los residuos aparentemente se distribuyen normal pues el p-value 
+#es 0.1268>0.05
+@
+Es decir, tenemos un p\-valor más grande que el nivel de significancia, por lo que aparentemente los residuos s\'i se distribuyen normales.\\
+\textbf{Independencia}\\
+Para ver este supuesto se har\'a la prueba.\\
+<<echo=false, warnings=F>>=
+#INDEPENDENCIA
+#Prueba Durbin-Watson de Autocorrelacion
+dwtest(AMLO8)
+#Esta prueba nos indica si hay autocorrelacion entre los residuos o no, si hay autocorrelacion #entre las variables entonces no son independientes, pero si no hay autocorrelacion entonces #podriamosdecir que nuestros datos son independientes, notemos que nuesto 
+#Dw=1.3131 lo cual no es muy cercano a dos, con lo que podriamos decir
+#que no hay autocorrelacion residual entonces los residuos no son independientes
+@
+Donde obtenemos un Dw que no es tan cercano a 2, entonces se rechaza que exista autocorrelaci\'on nula residual, por lo que no son independientes\\
+En general podemos decir que no se cumple ni la homosedasticidad, ni la independencia en los residuos, por lo que debemos tratar de transformar algunas (o todas) las variables para que el modelo mejore\\
+\textbf{TRANSFORMACIONES}\\
+Haremos las transformaciones con la lambda correspondiente, y al hacer diversas pruebas, obtenemos el que es el mejor modelo, pues con menos transformaciones ayuda a mejorar el modelo anterior, despu\'es de esto nos queda el siguiente modelo
+<<echo=false, warnings=F, results=hide>>=
+#######Transformemos las varibles para ver si esto mejora########
+attach(INEGI_INE_TRAIN)
+#Veamos que sucede al transformar esta variables pues es la que tiene un p-valor mayor
+summary(r <- powerTransform(BD_AMLO)) 
+lambda_AMLO<-c(0.5,  0, 0.5, 1, 0, 1, 1, 0.5, 0.5, 1,  1, 2, 0.81, -0.18,  46.89,  70.74)
+IND_074_tra<-log(IND_074)
+IND_115_tra<-basicPower(IND_115, 0.5) 
+IND_087_tra<-basicPower(IND_087, 1)
+IND_047_tra<-log(IND_047)
+IND_815_tra<-basicPower(IND_815, 1)
+IND_119_tra<-basicPower(IND_119, 1)
+IND_082_tra<-basicPower(IND_082, 0.5)
+IND_121_tra<-basicPower(IND_121, 0.5)
+IND_804_tra<-basicPower(IND_804, 1)
+IND_056_tra<-basicPower(IND_056, 1)
+IND_095_tra<-basicPower(IND_095, 2)
+Complejidad_tra<-basicPower(Complejidad, .81)
+IND_002_tra<-basicPower(IND_002, -.18)
+IND_088_tra<-basicPower(IND_088, 46.89)
+IND_064_tra<-basicPower(IND_064, 70.74)
+@
+
+<<echo=false, warnings=F>>=
+AMLO_trans<-lm(formula = AMLO ~ IND_074+ IND_115_tra + IND_087_tra + IND_047_tra + IND_815 + 
+    IND_119 + IND_082_tra + IND_121_tra + IND_804 + IND_056 + IND_095 + 
+    Complejidad_tra + IND_002 + IND_088 + IND_064_tra, data = INEGI_INE_TRAIN)
+summary(AMLO_trans)
+@
+Con el cual obtenemos un $R^2$ de 0.7599, es decir describe m\'as varianza que incluso el modelo con todas las variables\\
+Revisemos nuevamente todos los supuestos, para ver que el modelo realmente mejor\'o
+\textbf{Multicolinealidad}
+Para ver si se cumple este supuesto debemos ver si no existe correlaci\'on entre ellos, m\'as a\'un si el vif (variance inflation factor) es menor a 10
+<<echo=false, warnings=F>>=
+#####revisemos los supuestos####
+#MULTICOLINEALIDAD
+vif(AMLO_trans)#los vif son menores a 10, de hecho menores a 5, por lo que se puede descartar la multicolinealidad
+@
+Los vif son menores a 10, de hecho son menores a 5, por lo que se puede descartar la multicolinealidad\\
+\textbf{Homosedasticidad}\\
+Para ver si este supuesto se cumple, primero veremos que sucede al graficar los residuos estandarizados, contra los valores ajustado. Como podemos observar en la gráfica siguiente, puede decirse que si es una g´rafica nula, por lo que tendriamos varianza constante, es decir, la homocedasticidad si se cumple.\\
+<<echo=false, fig=TRUE, warnings=F>>=
+#HOMOSEDASTICIDAD 
+resestandarAMLO_trans<-rstandard(AMLO_trans) #residuos estandarizados
+vajustadosAMLO_trans<-fitted(AMLO_trans) #valores ajustados
+#Graficamos para ver si la varianza es constante 
+plot(vajustadosAMLO_trans,resestandarAMLO_trans, pch=20, 
+     main="Grafica para comprobar homoscedasticidad",ylim = c(-3,3))
+abline(h=qnorm(0.975,0,1)*sd(resestandarAMLO_trans),col="red4",lwd=3)
+abline(h=-qnorm(0.975,0,1)*sd(resestandarAMLO_trans),col="red4",lwd=3)#Vemos que en la gráfica se observa un compotamiento relativamente bueno, pues se ve como una gráfica nula
+@
+\\Vemos que en la g\'rafica se observa un comportamiento relativamente bueno, pues se ve como una gr\'afica nula, por lo que se puede decir que la homosedasticidad si se cumple\\
+\textbf{Normalidad}\\
+Al igual que para la prueba anterior, primero se har\'a una prueba gr\'afica\\
+<<echo=false, fig=T,warnings=F>>=
+#NORMALIDAD
+#Grafica probabilidad normal (QQ plot)
+qqnorm(resestandarAMLO_trans,main="QQ-Plot de Residuos", pch=19,
+       xlab="Cuantiles Teoricos", ylab="Cuantiles Muestrales",
+       col="blue3")
+qqline(resestandarAMLO_trans,col="Red",lwd=3)
+#Este grafico nos indica que parece que los datos se ajustan en el
+#centro de la distribucion pero parece que hay problemas en una de las colas
+@
+\\Este gr\'afico, al igual que el de antes de transformar, nos indica que los datos se ajustan bien en el centro y en la cola derecha de la distribuci\'on, sin mebargo puede haber probelmas en la cola derecha, para estar seguros se hara la siguiente prueba mucho m\'as formal\\
+<<echo=false,warnings=F>>=
+#Prueba Anderson-Darling, la mas potente de para la normalidad
+ad.test(resestandarAMLO_trans)
+#Esta prueba nos dice que los residuos aparentemente se distribuyen normal pues el p-value 
+#es 0.1181>0.05
+@
+Con esta prueba podemos decir que los residuos se distribuyen normal, pues el p\-valor es mayor que el niven de significancia 0.05\\
+\textbf{Independencia}\\
+Para ver este supuesto se har\'a la prueba.\\
+<<echo=false,warnings=F>>=
+#INDEPENDENCIA
+#Prueba Durbin-Watson de Autocorrelacion
+dwtest(AMLO_trans)
+#Esta prueba nos indica si hay autocorrelacion entre los residuos o no, si hay autocorrelacion #entre las variables entonces no son independientes, pero si no hay autocorrelacion entonces #podriamosdecir que nuestros datos son independientes, notemos que nuesto 
+#Dw=1.5979 lo cual es relativamente cercano a dos, con lo que podriamos decir los residuos son #independientes
+@
+Con esta prueba obtenemos un DW relativamente cercano a dos, con lo que se puede decir que los residuos son independientes\\
+En general, se puede afirmar que el modelo transformado es superior al no transformado, pues mejora en todas las pruebas de los supuestos y adem\'as la $R^2$ aumenta\\
+
+\textbf{VALORES INFLUYENTES}\\
+Para saber si existen valores influyentes que puedan estar afectando a nuestro modelo, se hace la siguiente gr\'afica 
+
+<<echo=F,include=F, results=hide>>==
+##IDENTIFICACION DE VALORES ATIPICOS###
+#Diagnostico de influencia
+inflm.AMLO <- influence.measures(AMLO_trans)
+which(apply(inflm.AMLO$is.inf, 1, any)) #que observaciones considera influyentes
+summary(inflm.AMLO)
+@
+
+<<echo=false, fig=T, warnings=F>>=
+plot(AMLO_trans, which = 5)#donde podemos observan que no hay observaciones influyentes
+#Entonces podemos decir que nuestro modelo es bueno, pues no tiene observaciones que cambien su comportamiento 
+@
+\\Se observa que no existe observaciones influyentes.
+\\Entonces podemos decir que nuestro modelo es bueno, pues no existen observaciones que cambien su comportamiento.\\
+\textbf{PREDICCI\'ON}
+\\Finalmente, y para poder validar nuestro modelo, haremos la predicci\'on \\
+<<echo=false, results=hide, include=false, warnings=F>>=
+####PREDICCION####
+#Finalmente, con ayuda de nuestro modelo creado anteriormente, haremos una prediccion, para validarlo
+#para ello primero transformemos las variables que transformamos para el modelo definitivo
+attach(INEGI_INE_PRED)
+#Veamos que sucede al transformar esta variables pues es la que tiene un p-valor mayor
+summary(r <- powerTransform(BD_AMLO)) 
+lambda_AMLO<-c(0.5,  0, 0.5, 1, 0, 1, 1, 0.5, 0.5, 1,  1, 2, 0.81, -0.18,  46.89,  70.74)
+IND_074_tra<-log(IND_074)
+IND_115_tra<-basicPower(IND_115, 0.5) 
+IND_087_tra<-basicPower(IND_087, 1)
+IND_047_tra<-log(IND_047)
+IND_815_tra<-basicPower(IND_815, 1)
+IND_119_tra<-basicPower(IND_119, 1)
+IND_082_tra<-basicPower(IND_082, 0.5)
+IND_121_tra<-basicPower(IND_121, 0.5)
+IND_804_tra<-basicPower(IND_804, 1)
+IND_056_tra<-basicPower(IND_056, 1)
+IND_095_tra<-basicPower(IND_095, 2)
+Complejidad_tra<-basicPower(Complejidad, .81)
+IND_002_tra<-basicPower(IND_002, -.18)
+IND_088_tra<-basicPower(IND_088, 46.89)
+IND_064_tra<-basicPower(IND_064, 70.74)
+
+predAMLO_trans <- predict.lm(AMLO_trans, newdata = INEGI_INE_PRED , interval = "prediction", level = 0.95)
+y_minAMLO <- min(predAMLO_trans)
+y_maxAMLO <- max(predAMLO_trans)
+@
+
+<<echo=false, fig=TRUE, warnings=F>>=
+m <- nrow(INEGI_INE_PRED)
+par(mfrow = c(1, 2))
+plot(1:m, predAMLO_trans[,1], type = "l", lwd = 2, ylim = c(y_minAMLO, y_maxAMLO), 
+     ylab = "Predicción", xlab = "índice") 
+lines(1:m, predAMLO_trans[,2], lwd = 2, col = "blue")
+lines(1:m, predAMLO_trans[,3], lwd = 2, col = "blue")
+lines(1:m, INEGI_INE_PRED[,"AMLO"], lwd = 2, col = "red")
+#Como podemos observar, en la grafica el modelo que se ajusto es bastante bueno para predecir nuestros datos de prediccion, por lo que podemos concluir que es un buen modelo
+@
+\\Se observa en la gr\'afica que el modelo que se ajust\'o es bastante bueno para predecir nuestros datos de predicci\'on, por lo que se puede concluir que s\'i es un buen modelo\\
+\textbf{INTERPRETACI\'ON DE LOS PAR\'AMETROS}\\
+Como podremos observar, los parametros son sumamente pequeños, pues todas las variables son porcentajes\\
+Nuestras variables yafueron mencionadas, ahora bien, digamos cuales de ellas afectanpositivamente y cuales lo hacen negativamente. \\
+Positivamente son.\\
+\begin{enumerate}
+\item Estimador del total de poblaci\'on de 15 años y m\'as (Mujeres)\\
+\item Porcentaje de asistencia escolar de la poblaci\'on de 3 a 5 años\\
+\item Densidad de poblaci\'on (hab/km2)\\
+\item Porcentaje de viviendas con separaci\'on de residuos\\
+\item Porcentaje estatal de la poblaci\'on\\
+\item Porcentaje de la poblaci\'on de 12 años y m\'as separada\\
+\item Porcentaje de poblaci\'on de 15 años y m\'as con nivel de escolaridad media superior\\
+\item Porcentaje de viviendas con disponibilidad de electricidad en la vivienda\\
+\end{enumerate}
+Es decir, si estas variables aumentan, entonces los votos por AMLO tambi\'en lo hacen\\
+Ahora veamos que pasa con las negativas\\
+\begin{enumerate}
+\item Porcentaje de la poblaci\'on afiliada a servicios de salud\\
+\item Porcentaje de la poblaci\'on de 12 años y más económicamente activa (Total)\\
+\item Porcentaje de asistencia escolar de la poblaci\'on de 6 a 11 años\\
+\item Porcentaje de la poblaci\'on ocupada que labora en el sector econ\'omico de comercio\\
+\item Grupo de complejidad electoral\\
+\item Porcentaje de la poblaci\'on afiliada al IMSS\\
+\item Promedio de ocupantes por vivienda\\
+\end{enumerate}
+Lo que dice que, si las variables antes mencionadas disminuyen, los votos por AMLO aumentan
+
+\textbf{CONCLUSI\'ON}
+Puesto que las variables significativas para cada modelo no son iguales estos no son comparables, sin embargo si podemos destacar aquellas que coinciden pues influyen, si bien no con la misma importancia si de manera general, tal es el caso de Porcentaje de población de 12 años y más separada que influye en las tres modelos puesto que mientras que para Enrique Peña Nieto y Josefina V\'azquez Mota influyo de forma perjudicial a Andres Manuel L\'opez Obrador lo favoreci\'o.
+\\
+\\
+Puesto que las variables significativas para cada modelo no son iguales estos no son comparables, sin embargo si podemos destacar aquellas que coinciden pues influyen, si bien no con la misma importancia si de manera general, tal es el caso de Porcentaje de población de 12 años y más separada que influye en las tres modelos puesto que mientras que para Enrique Peña Nieto y Josefina Vázquez Mota influyo de forma perjudicial a Andres Manuel Lopez Obrador lo favorece.
+\end{document}
